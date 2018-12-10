@@ -5,8 +5,44 @@ import sys
 from collections import OrderedDict
 from multiprocessing import Pool
 
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+def break_up_pipes(commands):
+    cs = []
+    temp = []
+    for c in commands:
+        if c == '|':
+            cs.append(temp)
+            temp = []
+        else:
+            temp.append(c)
+    cs.append(temp)
+    return cs
+
+def run_subprocesses(commands):
+    cs = break_up_pipes(commands)
+    
+    # if just one command then just run
+    if len(cs) == 1:
+        return subprocess.check_output(cs[0])
+    
+    open_processes = []
+    prev = None
+    c = 0
+    for i, commands in enumerate(cs):
+        if i == 0:
+            prev = subprocess.Popen(commands, stdout=subprocess.PIPE)
+            open_processes.append(prev)
+        elif len(cs) - 1 != c:
+            prev = subprocess.Popen(commands, stdin=prev.stdout, stdout=subprocess.PIPE)
+            open_processes.append(prev)
+        else:
+            result = subprocess.check_output(commands, stdin=prev.stdout)
+
+        c += 1
+
+    for ps in open_processes:
+        ps.wait()
+        
+    return result
 
 def worker_wrapper(args):
         return execute_bam(*args)
@@ -20,10 +56,10 @@ def execute_bam(bam_fp, output_fp, operations_dict,
 
     # execute remaining commands
     command_args = generate_stream_commands(bam_fp, output_fp, operations_dict)
-    subprocess.check_output(command_args)
+    run_subprocesses(command_args)  
 
     if verbose:
-        eprint(f'{bam_fp} completed')
+        print(f'{bam_fp} completed')
 
     return output_fp
 
@@ -47,7 +83,7 @@ def generate_stream_commands(bam_fp, output_fp, operations_dict):
     c = len(operations_dict) - 1
     for operation_identifier, operation_kwargs in items:
         # if last operation, write an output file, otherwise stream to next operation
-        if c == 0:
+        if c == 1:
             command_args += get_command_from_identifier(None, output_fp, operation_identifier, operation_kwargs)
         else:
             command_args += get_command_from_identifier(None, None, operation_identifier, operation_kwargs) + ['|']
@@ -61,6 +97,8 @@ def get_command_from_identifier(bam_fp, output_fp, identifier, kwargs):
         return get_sort_command(bam_fp, output_fp, sort_threads=kwargs['sort_threads'])
     if identifier == 'position_filter':
         return get_position_filter_command(bam_fp, output_fp, kwargs['positions_fp'])
+
+    raise ValueError(f'identifier was {identifier}. Must be sort or position_filter')
 
 def get_sort_command(bam_fp, output_fp, sort_threads=1):
     """get samtools sort command
@@ -95,7 +133,7 @@ def get_position_filter_command(bam_fp, output_fp, positions_fp):
         - filepath for positions .bed file. File contains tab seperated positions in the following format:
         <chrom>\t<start-pos>\t<stop-pos>
     """
-    samtools_command = ['samtools', 'view', '-L', positions_fp]
+    samtools_command = ['samtools', 'view', '-h', '-L', positions_fp]
 
     if output_fp is not None:
         samtools_command += ['-o', output_fp]
@@ -172,4 +210,6 @@ class SamtoolsWrapper(object):
             arg_pool.append((fp, output_fp, self.operations_dict, index_input_bam, self.verbose))
         
         with Pool(self.num_threads) as p:
-            p.map(worker_wrapper, arg_pool)
+            results = p.map(worker_wrapper, arg_pool)
+
+        print(results)
